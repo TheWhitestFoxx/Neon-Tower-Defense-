@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Neon Tower Defense — Strategy Game (Day 21)</title>
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;700;800;900&display=swap" rel="stylesheet" />
+  <style>
+    body { font-family: 'Inter', system-ui, sans-serif; touch-action: manipulation; }
+    canvas { display: block; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col items-center justify-between p-3 sm:p-5 select-none">
+
+  <header class="w-full max-w-2xl flex flex-wrap items-center justify-between gap-2 bg-slate-900/90 border border-slate-800 rounded-2xl px-4 py-2.5 shadow-lg">
+    <div class="flex items-center gap-2.5">
+      <div class="w-8 h-8 rounded-xl bg-gradient-to-br from-fuchsia-500 to-cyan-500 flex items-center justify-center font-black text-slate-950 text-sm">🗼</div>
+      <div>
+        <h1 class="font-extrabold text-sm sm:text-base leading-none">Neon Tower Defense</h1>
+        <span class="text-[11px] text-fuchsia-400 font-semibold">Day 21 • Games</span>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-4 text-center">
+      <div><div class="text-[10px] text-slate-400 uppercase">Credits</div><div id="hud-cred" class="font-extrabold text-sm text-amber-400">120</div></div>
+      <div><div class="text-[10px] text-slate-400 uppercase">Wave</div><div id="hud-wave" class="font-extrabold text-sm text-cyan-400">1</div></div>
+      <div><div class="text-[10px] text-slate-400 uppercase">Base HP</div><div id="hud-hp" class="font-extrabold text-sm text-rose-400">10</div></div>
+    </div>
+
+    <div class="flex items-center gap-1.5">
+      <button id="mute-btn" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold">🔊</button>
+      <button id="wave-btn" class="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-xs font-extrabold">Next Wave</button>
+    </div>
+  </header>
+
+  <main class="relative w-full max-w-2xl my-3 rounded-2xl overflow-hidden border border-fuchsia-500/30 bg-slate-950 shadow-2xl">
+    <canvas id="td-canvas" class="w-full aspect-[4/3] cursor-crosshair"></canvas>
+  </main>
+
+  <footer class="w-full max-w-2xl flex flex-wrap items-center justify-between gap-2 bg-slate-900/90 border border-slate-800 rounded-2xl px-4 py-2.5 text-xs">
+    <div class="flex gap-2">
+      <button data-type="laser" class="tur-btn px-3 py-1.5 rounded-xl bg-cyan-500 text-slate-950 font-bold">Laser ($40)</button>
+      <button data-type="cannon" class="tur-btn px-3 py-1.5 rounded-xl border border-slate-700 text-slate-300 font-bold">Pulse ($70)</button>
+    </div>
+    <span class="text-slate-400">Tap any dark grid tile to build a turret.</span>
+    <button id="reset-btn" class="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 font-semibold">Restart</button>
+  </footer>
+
+  <script>
+    const canvas = document.getElementById('td-canvas');
+    const ctx = canvas.getContext('2d');
+    const $ = (id) => document.getElementById(id);
+
+    let audioCtx = null, muted = false;
+    function initAudio() { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+    function beep(freq, dur = 0.05, type = 'sine') {
+      if (muted || !audioCtx) return;
+      try {
+        const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+        o.type = type; o.frequency.setValueAtTime(freq, audioCtx.currentTime);
+        g.gain.setValueAtTime(0.06, audioCtx.currentTime);
+        g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+        o.connect(g); g.connect(audioCtx.destination); o.start(); o.stop(audioCtx.currentTime + dur);
+      } catch {}
+    }
+
+    const COLS = 12, ROWS = 9;
+    const PATH = [[0,4],[1,4],[2,4],[2,2],[3,2],[4,2],[5,2],[5,6],[6,6],[7,6],[8,6],[8,3],[9,3],[10,3],[11,3]];
+    const pathSet = new Set(PATH.map(([c, r]) => `${c},${r}`));
+
+    let W = 600, H = 450, cw = 50, ch = 50;
+    let credits = 120, wave = 1, hp = 10, selectedType = 'laser';
+    let turrets = [], enemies = [], shots = [], spawnQueue = 0, spawnTick = 0, rafId = null;
+
+    function resize() {
+      const r = canvas.parentElement.getBoundingClientRect();
+      W = Math.max(320, Math.floor(r.width));
+      H = Math.floor(W * 0.75);
+      canvas.width = W; canvas.height = H;
+      cw = W / COLS; ch = H / ROWS;
+    }
+
+    function updateHud() {
+      $('hud-cred').textContent = credits;
+      $('hud-wave').textContent = wave;
+      $('hud-hp').textContent = hp;
+    }
+
+    function startWave() {
+      initAudio();
+      if (spawnQueue > 0 || enemies.length > 0) return;
+      spawnQueue = 5 + wave * 3;
+      beep(620, 0.1, 'triangle');
+    }
+
+    function resetGame() {
+      credits = 120; wave = 1; hp = 10;
+      turrets = []; enemies = []; shots = []; spawnQueue = 0;
+      updateHud();
+    }
+
+    function step() {
+      if (hp <= 0) return;
+      if (spawnQueue > 0) {
+        spawnTick++;
+        if (spawnTick >= 28) {
+          spawnTick = 0; spawnQueue--;
+          const maxHp = 22 + wave * 14;
+          enemies.push({ idx: 0, t: 0, hp: maxHp, maxHp, spd: 0.018 + wave * 0.002 });
+        }
+      }
+
+      for (let i = enemies.length - 1; i >= 0; i--) {
+        const e = enemies[i];
+        e.t += e.spd;
+        if (e.t >= 1) { e.t -= 1; e.idx++; }
+        if (e.idx >= PATH.length - 1) {
+          hp = Math.max(0, hp - 1);
+          enemies.splice(i, 1);
+          updateHud();
+          beep(160, 0.15, 'sawtooth');
+          continue;
+        }
+        const [c1, r1] = PATH[e.idx], [c2, r2] = PATH[e.idx + 1];
+        e.x = (c1 + (c2 - c1) * e.t + 0.5) * cw;
+        e.y = (r1 + (r2 - r1) * e.t + 0.5) * ch;
+      }
+
+      turrets.forEach(t => {
+        if (t.cd > 0) t.cd--;
+        if (t.cd === 0 && enemies.length) {
+          const tx = (t.c + 0.5) * cw, ty = (t.r + 0.5) * ch;
+          const target = enemies.find(e => Math.hypot(e.x - tx, e.y - ty) <= t.range * cw);
+          if (target) {
+            t.cd = t.rate;
+            shots.push({ x1: tx, y1: ty, x2: target.x, y2: target.y, life: 6, color: t.type === 'laser' ? '#22d3ee' : '#e879f9' });
+            target.hp -= t.dmg;
+            beep(t.type === 'laser' ? 760 : 320, 0.04);
+            if (target.hp <= 0) {
+              const idx = enemies.indexOf(target);
+              if (idx !== -1) enemies.splice(idx, 1);
+              credits += 15;
+              updateHud();
+            }
+          }
+        }
+      });
+
+      if (spawnQueue === 0 && enemies.length === 0 && shots.length === 0 && hp > 0) {
+        // Wave cleared check handled when last enemy dies
+      }
+
+      for (let i = shots.length - 1; i >= 0; i--) {
+        shots[i].life--;
+        if (shots[i].life <= 0) shots.splice(i, 1);
+      }
+    }
+
+    function draw() {
+      ctx.fillStyle = '#020617';
+      ctx.fillRect(0, 0, W, H);
+
+      // Grid
+      for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+          const isPath = pathSet.has(`${c},${r}`);
+          ctx.fillStyle = isPath ? 'rgba(30, 41, 59, 0.9)' : 'rgba(15, 23, 42, 0.5)';
+          ctx.fillRect(c * cw + 1, r * ch + 1, cw - 2, ch - 2);
+        }
+      }
+
+      // Turrets
+      turrets.forEach(t => {
+        const cx = (t.c + 0.5) * cw, cy = (t.r + 0.5) * ch;
+        ctx.fillStyle = t.type === 'laser' ? '#22d3ee' : '#e879f9';
+        ctx.beginPath(); ctx.arc(cx, cy, cw * 0.3, 0, Math.PI * 2); ctx.fill();
+      });
+
+      // Enemies
+      enemies.forEach(e => {
+        ctx.fillStyle = '#fb7185';
+        ctx.beginPath(); ctx.arc(e.x, e.y, cw * 0.24, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#10b981';
+        ctx.fillRect(e.x - 12, e.y - 16, 24 * Math.max(0, e.hp / e.maxHp), 3);
+      });
+
+      // Shots
+      shots.forEach(s => {
+        ctx.strokeStyle = s.color; ctx.lineWidth = 2.5;
+        ctx.beginPath(); ctx.moveTo(s.x1, s.y1); ctx.lineTo(s.x2, s.y2); ctx.stroke();
+      });
+
+      if (hp <= 0) {
+        ctx.fillStyle = 'rgba(2, 6, 23, 0.8)'; ctx.fillRect(0, 0, W, H);
+        ctx.fillStyle = '#f43f5e'; ctx.font = 'bold 28px Inter'; ctx.textAlign = 'center';
+        ctx.fillText('BASE DESTROYED — PRESS RESTART', W / 2, H / 2);
+      }
+    }
+
+    function loop() {
+      step(); draw();
+      rafId = requestAnimationFrame(loop);
+    }
+
+    canvas.addEventListener('click', (e) => {
+      initAudio();
+      const rect = canvas.getBoundingClientRect();
+      const c = Math.floor(((e.clientX - rect.left) / rect.width) * COLS);
+      const r = Math.floor(((e.clientY - rect.top) / rect.height) * ROWS);
+      if (pathSet.has(`${c},${r}`) || turrets.some(t => t.c === c && t.r === r)) return;
+      const cost = selectedType === 'laser' ? 40 : 70;
+      if (credits < cost) { beep(180, 0.08); return; }
+      credits -= cost;
+      turrets.push({
+        c, r, type: selectedType,
+        range: selectedType === 'laser' ? 2.6 : 2.1,
+        rate: selectedType === 'laser' ? 16 : 34,
+        dmg: selectedType === 'laser' ? 12 : 34,
+        cd: 0
+      });
+      beep(540, 0.07, 'triangle');
+      updateHud();
+    });
+
+    document.querySelectorAll('.tur-btn').forEach(b => {
+      b.addEventListener('click', () => {
+        selectedType = b.dataset.type;
+        document.querySelectorAll('.tur-btn').forEach(x => {
+          x.className = `tur-btn px-3 py-1.5 rounded-xl text-xs font-bold ${x.dataset.type === selectedType ? 'bg-cyan-500 text-slate-950' : 'border border-slate-700 text-slate-300'}`;
+        });
+      });
+    });
+
+    $('wave-btn').addEventListener('click', () => {
+      if (spawnQueue === 0 && enemies.length === 0) { wave++; updateHud(); startWave(); }
+      else startWave();
+    });
+    $('reset-btn').addEventListener('click', resetGame);
+    $('mute-btn').addEventListener('click', () => { initAudio(); muted = !muted; $('mute-btn').textContent = muted ? '🔇' : '🔊'; });
+
+    window.addEventListener('resize', resize);
+    window.onload = () => { resize(); updateHud(); startWave(); loop(); };
+  </script>
+</body>
+</html>
